@@ -7,6 +7,7 @@ import math, random, time
 # CONFIGURATION CONSTANTS
 # =============================
 
+
 WINDOW_W, WINDOW_H = 1500, 1000
 ASPECT = WINDOW_W / WINDOW_H
 FOVY = 75.0
@@ -880,4 +881,5 @@ def main():
     glutMainLoop()
 
 if __name__ == "__main__":
+
     main()
