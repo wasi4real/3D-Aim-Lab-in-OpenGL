@@ -31,14 +31,25 @@ RAY_MAX_DIST = 3000.0
 
 # Target spawn timing
 SPAWN_INTERVAL_START = 0.3
+SPAWN_INTERVAL_MIN = 0.05
+SPAWN_ACCEL = 0.02
 
 # Animation settings
 SPHERE_MOVE_SPEED = 80.0
 SPHERE_MOVE_RANGE = 200.0
 
+# GAME MODE CONFIGURATION
+MODES = ["Normal", "Endless", "Time Trial", "Precision"]
+MODE_NORMAL, MODE_ENDLESS, MODE_TIMETRIAL, MODE_PRECISION = 0, 1, 2, 3
+
 # DURATION OPTIONS
 DURATION_OPTIONS = [15.0, 30.0, 60.0, 120.0]
 DURATION_LABELS = ["15 sec", "30 sec", "1 min", "2 min"]
+
+# Mode-specific constants
+TIME_TRIAL_HIT_BONUS = 1.0   # Seconds added per hit in Time Trial
+TT_MIN_RADIUS_FACTOR = 0.20  # Minimum size factor for shrinking targets
+PRECISION_INNER_RATIO = 0.50  # Head-to-body ratio for precision targets
 
 # GLOBAL STATE VARIABLES
 quadric = None
@@ -62,6 +73,7 @@ score = 0
 shots = 0
 hits = 0
 spawned_spheres_count = 0
+headshot_hits = 0  # For Precision mode
 
 # Timing variables
 start_time = None
@@ -155,7 +167,15 @@ def compute_menu_layout():
     for i in range(4):
         duration_buttons.append((start_x + i*(bw + spacing), WINDOW_H//2 - 120, bw, bh))
 
-
+    # Mode selection buttons
+    mode_buttons = []
+    m_w, m_h, m_gap = 200, 54, 20
+    total_w = len(MODES)*m_w + (len(MODES)-1)*m_gap
+    mx0 = WINDOW_W//2 - total_w//2
+    my = WINDOW_H//2 - 40
+    for i in range(len(MODES)):
+        mode_buttons.append((mx0 + i*(m_w + m_gap), my, m_w, m_h))
+        
 # TARGET MANAGEMENT
 def random_target_pos():
     x = random.uniform(-ARENA_HALF * 0.5, ARENA_HALF * 0.5)
@@ -168,6 +188,11 @@ def spawn_target():
     
     if len(targets) >= MAX_TARGETS:
         return
+
+    # Determine target properties based on game mode
+    if selected_mode_index == MODE_PRECISION:
+        r = TARGET_RADIUS
+        ttl = random.uniform(2.8, 4.5)
     
     pos = random_target_pos()
     target = {
@@ -198,9 +223,22 @@ def update_targets():
             # Apply glow effect (pulsing size)
             if glowing_spheres:
                 t['glow_phase'] += 0.03
-                t['r'] = TARGET_RADIUS * (1.0 + 0.3 * math.sin(t['glow_phase']))
+                base_r = t['original_r']
+                
+                # Time Trial: shrink base radius before applying glow
+                if selected_mode_index == MODE_TIMETRIAL:
+                    base_r = max(TARGET_RADIUS * TT_MIN_RADIUS_FACTOR,
+                                TARGET_RADIUS * time_trial_size_factor())
+                
+                # Apply pulsing glow effect
+                t['r'] = base_r * (1.0 + 0.3 * math.sin(t['glow_phase']))
             else:
-                t['r'] = TARGET_RADIUS
+                # No glow: still apply Time Trial shrinking if active
+                if selected_mode_index == MODE_TIMETRIAL:
+                    t['r'] = max(TARGET_RADIUS * TT_MIN_RADIUS_FACTOR,
+                                TARGET_RADIUS * time_trial_size_factor())
+                else:
+                    t['r'] = t['original_r']
             
             alive.append(t)
     
@@ -218,9 +256,115 @@ def draw_floor():
     glEnd()
 
 
+def draw_checkboard_wall(x0, x1, y0, y1, z0, z1, tile_w, tile_h):
+    """Draw a checkered pattern wall between two points."""
+    brown = (0.2, 0.2, 0.2)
+    silver = (0.75, 0.75, 0.75)
+    
+    # Determine if wall is horizontal or vertical
+    if abs(x1 - x0) > abs(y1 - y0):
+        # Horizontal wall (varies in X)
+        hstart = min(x0, x1)
+        hend = max(x0, x1)
+        vstart = min(z0, z1)
+        vend = max(z0, z1)
+        h_steps = int(math.ceil((hend - hstart) / tile_w))
+        v_steps = int(math.ceil((vend - vstart) / tile_h))
+        y_const = y0
+        
+        # Draw checkerboard tiles
+        for i in range(h_steps):
+            for j in range(v_steps):
+                left = hstart + i * tile_w
+                right = min(hstart + (i+1) * tile_w, hend)
+                bottom = vstart + j * tile_h
+                top = min(vstart + (j+1) * tile_h, vend)
+                
+                # Alternate colors for checkerboard pattern
+                col = brown if ((i + j) % 2 == 0) else silver
+                glColor3f(*col)
+                
+                glBegin(GL_QUADS)
+                glVertex3f(left, y_const, bottom)
+                glVertex3f(right, y_const, bottom)
+                glVertex3f(right, y_const, top)
+                glVertex3f(left, y_const, top)
+                glEnd()
+    else:
+        # Vertical wall (varies in Y)
+        hstart = min(y0, y1)
+        hend = max(y0, y1)
+        vstart = min(z0, z1)
+        vend = max(z0, z1)
+        h_steps = int(math.ceil((hend - hstart) / tile_w))
+        v_steps = int(math.ceil((vend - vstart) / tile_h))
+        x_const = x0
+        
+        # Draw checkerboard tiles
+        for i in range(h_steps):
+            for j in range(v_steps):
+                left = hstart + i * tile_w
+                right = min(hstart + (i+1) * tile_w, hend)
+                bottom = vstart + j * tile_h
+                top = min(vstart + (j+1) * tile_h, vend)
+                
+                # Alternate colors for checkerboard pattern
+                col = brown if ((i + j) % 2 == 0) else silver
+                glColor3f(*col)
+                
+                glBegin(GL_QUADS)
+                glVertex3f(x_const, left, bottom)
+                glVertex3f(x_const, right, bottom)
+                glVertex3f(x_const, right, top)
+                glVertex3f(x_const, left, top)
+                glEnd()
+
+
+def draw_walls():
+    """Render all four arena walls with checkerboard pattern."""
+    tile_w = 80.0
+    tile_h = 80.0
+    
+    # Back wall (y = ARENA_HALF)
+    draw_checkboard_wall(-ARENA_HALF, ARENA_HALF, ARENA_HALF, ARENA_HALF, 
+                        FLOOR_Z, WALL_HEIGHT, tile_w, tile_h)
+    
+    # Left wall (x = -ARENA_HALF)
+    draw_checkboard_wall(-ARENA_HALF, -ARENA_HALF, -ARENA_HALF, ARENA_HALF, 
+                        FLOOR_Z, WALL_HEIGHT, tile_w, tile_h)
+    
+    # Right wall (x = ARENA_HALF)
+    draw_checkboard_wall(ARENA_HALF, ARENA_HALF, -ARENA_HALF, ARENA_HALF, 
+                        FLOOR_Z, WALL_HEIGHT, tile_w, tile_h)
+    
+    # Front wall (y = -ARENA_HALF)
+    draw_checkboard_wall(-ARENA_HALF, ARENA_HALF, -ARENA_HALF, -ARENA_HALF, 
+                        FLOOR_Z, WALL_HEIGHT, tile_w, tile_h)
+
+def draw_precision_target(t):
+    """Draw a precision mode target with body and headshot zone."""
+    # Main body sphere (blue)
+    glPushMatrix()
+    glTranslatef(t['p'][0], t['p'][1], t['p'][2])
+    glColor3f(0.02, 0.48, 0.98)
+    gluSphere(quadric, t['r'], 32, 24)
+    
+    # Head sphere (red, positioned above body)
+    glPushMatrix()
+    glTranslatef(0, 0, t['r'] * 1.5)
+    glColor3f(0.90, 0.20, 0.25)
+    head_r = t['r'] * PRECISION_INNER_RATIO
+    gluSphere(quadric, head_r, 24, 16)
+    glPopMatrix()
+    
+    glPopMatrix()
+    
 # RENDERING - TARGETS
 def draw_targets():
     for t in targets:
+        if selected_mode_index == MODE_PRECISION: # Special rendering for Precision mode
+            draw_precision_target(t)
+            continue
         glPushMatrix()
         glTranslatef(t['p'][0], t['p'][1], t['p'][2])
         
@@ -230,6 +374,7 @@ def draw_targets():
         elif glowing_spheres:
             intensity = 0.7 + 0.3 * math.sin(t['glow_phase'])
             glColor3f(0.02 * intensity, 0.48 * intensity, 0.98 * intensity)
+            
         else:
             glColor3f(0.02, 0.48, 0.98)  # Standard blue
         
@@ -268,6 +413,7 @@ def draw_button(x, y, w, h, label, highlight=False):
     draw_text(x + 18, y + h//2 - 8, label)
 
 def draw_hud():
+    # Set up 2D overlay projection
     glMatrixMode(GL_PROJECTION)
     glPushMatrix()
     glLoadIdentity()
@@ -276,16 +422,60 @@ def draw_hud():
     glPushMatrix()
     glLoadIdentity()
     
+    # Primary stats line (Score, Time, Accuracy)
     glColor3f(1, 1, 1)
     draw_text(50, WINDOW_H - 40, f"SCORE: {score}")
     
-    time_remaining = max(0.0, SESSION_TIME - elapsed)
-    draw_text(WINDOW_W//2 - 60, WINDOW_H - 40, f"TIME: {time_remaining:0.1f}s")
+    # Time display (mode-specific)
+    if selected_mode_index == MODE_TIMETRIAL:
+        draw_text(WINDOW_W//2 - 60, WINDOW_H - 40, f"TIME: {max(0.0, time_bank):0.1f}s")
+    else:
+        time_remaining = max(0.0, SESSION_TIME - elapsed)
+        draw_text(WINDOW_W//2 - 60, WINDOW_H - 40, f"TIME: {time_remaining:0.1f}s")
     
-    accuracy = 0 if shots == 0 else int(100 * (hits / shots))
+    # Accuracy percentage
+    accuracy = 0 if shots == 0 else int(100 * (hits / max(1, shots)))
     draw_text(WINDOW_W - 260, WINDOW_H - 40, f"ACCURACY: {accuracy}%")
-
     
+    # Mode indicator
+    glColor3f(0.85, 0.85, 0.85)
+    draw_text(WINDOW_W//2 - 60, WINDOW_H - 70, f"MODE: {MODES[selected_mode_index]}", 
+             GLUT_BITMAP_HELVETICA_12)
+    
+    # Precision mode: show headshot statistics
+    if selected_mode_index == MODE_PRECISION:
+        head_acc = 0 if shots == 0 else int(100 * headshot_hits / shots)
+        draw_text(WINDOW_W - 260, WINDOW_H - 70, 
+                 f"headshot: {head_acc}% ({headshot_hits}/{shots})", 
+                 GLUT_BITMAP_HELVETICA_12)
+    
+    # Secondary info panel (left side)
+    glColor3f(0.8, 0.8, 0.8)
+    draw_text(18, WINDOW_H - 70, f"Targets: {len(targets)}/{MAX_TARGETS}", 
+             GLUT_BITMAP_HELVETICA_12)
+    draw_text(18, WINDOW_H - 90, f"FOV: {current_fov:.1f}°", 
+             GLUT_BITMAP_HELVETICA_12)
+    draw_text(18, WINDOW_H - 110, f"Pos: ({player_pos[0]:.0f}, {player_pos[1]:.0f})", 
+             GLUT_BITMAP_HELVETICA_12)
+    draw_text(18, WINDOW_H - 130, f"Animated: {'ON' if animated_spheres else 'OFF'}", 
+             GLUT_BITMAP_HELVETICA_12)
+    draw_text(18, WINDOW_H - 150, f"Glowing: {'ON' if glowing_spheres else 'OFF'}", 
+             GLUT_BITMAP_HELVETICA_12)
+    
+    # Control instructions (bottom)
+    glColor3f(0.7, 0.7, 0.7)
+    draw_text(WINDOW_W//2 - 420, 30,
+             "A/D: Move | W/S: FOV | Arrow Keys: Look around | M: Animation | G: Glowing | Space: Pause | R: Restart | P: Menu | Esc: Quit",
+             GLUT_BITMAP_HELVETICA_12)
+    
+    # Pause overlay
+    if paused:
+        glColor3f(1, 0.5, 0.5)
+        draw_text(WINDOW_W//2 - 80, WINDOW_H//2 + 20, "GAME PAUSED")
+        draw_text(WINDOW_W//2 - 120, WINDOW_H//2 - 20, "Press SPACE to continue")
+        glColor3f(1, 1, 1)
+    
+    # Restore 3D projection
     glPopMatrix()
     glMatrixMode(GL_PROJECTION)
     glPopMatrix()
@@ -509,18 +699,54 @@ def mouseListener(button, state, x, y):
             shots += 1
             
             ro, rd = get_ray_from_mouse(x, y)
-            
+            # Find closest target hit
+            headshot_hit = False           
             best_t, best_idx = None, -1
-            for i, t in enumerate(targets):
+            for i, t in enumerate(list(targets)):
+                # Precision mode: check headshot zone first
+                if selected_mode_index == MODE_PRECISION:
+                    head_pos = [t['p'][0], t['p'][1], t['p'][2] + t['r'] * 1.5]
+                    head_r = t['r'] * PRECISION_INNER_RATIO
+                    ht = line_sphere_intersect(ro, rd, head_pos, head_r)
+                    
+                    if ht is not None and 0 <= ht <= RAY_MAX_DIST:
+                        if best_t is None or ht < best_t:
+                            best_t, best_idx = ht, i
+                            headshot_hit = True
+                            continue
+                
+                # Check body hit
                 bt = line_sphere_intersect(ro, rd, t['p'], t['r'])
                 if bt is not None and 0 <= bt <= RAY_MAX_DIST:
                     if best_t is None or bt < best_t:
                         best_t, best_idx = bt, i
+                        headshot_hit = False
             
+            # Process hit or miss
             if best_idx >= 0:
-                score += 1
-                hits += 1
+                t = targets[best_idx]
+                
+                # Award points based on hit type
+                if selected_mode_index == MODE_PRECISION:
+                    if headshot_hit:
+                        score += 5  # Headshot bonus
+                        headshot_hits += 1
+                        hits += 1
+                    else:
+                        score += 1  # Body hit
+                        hits += 1
+                else:
+                    score += 1
+                    hits += 1
+                    
+                    # Time Trial: add time bonus
+                    if selected_mode_index == MODE_TIMETRIAL:
+                        time_bank += TIME_TRIAL_HIT_BONUS
+                
+                # Remove hit target
                 del targets[best_idx]
+            else:
+                misses += 1
 
 
 # MAIN LOOP
@@ -549,8 +775,9 @@ def idle():
                 idle.spawn_accum = 0.0
                 spawn_target()
         
-        if elapsed >= SESSION_TIME:
-            end_run()
+        if selected_mode_index in (MODE_NORMAL, MODE_ENDLESS, MODE_PRECISION):
+            if elapsed >= SESSION_TIME:
+                end_run(reason="duration_reached")
     
     glutPostRedisplay()
 
@@ -607,4 +834,5 @@ def main():
     glutMainLoop()
 
 if __name__ == "__main__":
+
     main()
